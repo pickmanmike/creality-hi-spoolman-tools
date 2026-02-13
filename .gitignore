@@ -1,0 +1,19 @@
+# Local config (do not commit secrets)
+config/*.json
+!config/*.example.json
+
+# Local state + logs
+data/
+logs/
+*.log
+
+# Spoolman databases (if you keep them in-repo)
+*.db
+*.sqlite
+*.sqlite3
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

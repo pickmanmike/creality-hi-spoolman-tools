@@ -1,0 +1,15 @@
+version: '3.8'
+services:
+  spoolman:
+    image: ghcr.io/donkie/spoolman:latest
+    restart: unless-stopped
+    volumes:
+      # Mount the host machine's ./data directory into the container's /home/app/.local/share/spoolman directory
+      - type: bind
+        source: ./data
+        target: /home/app/.local/share/spoolman
+    ports:
+      # Map the host machine's port 7912 to the container's port 8000
+      - "7912:8000"
+    environment:
+      - TZ=America/New_York

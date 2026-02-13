@@ -1,0 +1,715 @@
+--- a/Windows/CFS-RFID/MainForm.cs
++++ b/Windows/CFS-RFID/MainForm.cs
+@@ -442,17 +442,32 @@
+         }
+ 
+ 
+-        void WriteSpoolData(string MaterialID, string Color, string Length)
++        
++        void WriteSpoolData(string MaterialID, string Color, string Length, string reserve6Override = null, string successToast = "Data written to tag")
+         {
+-            bool encrypted = false;
+             string filamentId = "1" + MaterialID;
+             string vendorId = "0276";
+             string color = "0" + Color;
+             string serialNum = "000001";
+-            string reserve = "00000000000000";
+-            string tagData = "AB124" + vendorId + "A2" + filamentId + color + Length + serialNum + reserve + printerModel.Text;
+-            string paddedData = tagData.PadRight(96, ' ');
++
++            // Creality's "reserve" field is typically 6 chars; this writer keeps a 14-char slot on-tag
++            // (reserve6 + reserved8). We place the Spoolman spool.id into reserve6.
++            string reserve6 = string.IsNullOrEmpty(reserve6Override) ? "000000" : reserve6Override.Trim();
++            if (reserve6.Length < 6) reserve6 = reserve6.PadLeft(6, '0');
++            if (reserve6.Length > 6) reserve6 = reserve6.Substring(reserve6.Length - 6, 6);
++
++            string reserve14 = reserve6 + "00000000";
++
++            string tagData = "AB124" + vendorId + "A2" + filamentId + color + Length + serialNum + reserve14 + printerModel.Text;
++            WriteTagString(tagData, successToast);
++        }
++
++        private void WriteTagString(string tagData, string successToast = "Data written to tag")
++        {
++            bool encrypted = false;
++            string paddedData = (tagData ?? string.Empty).PadRight(96, ' ');
+             byte[] fullDataBytes = Encoding.UTF8.GetBytes(paddedData);
++
+             try
+             {
+                 if (reader == null)
+@@ -472,12 +487,14 @@
+                     byte[] s1Raw = new byte[48];
+                     Array.Copy(fullDataBytes, 0, s1Raw, 0, 48);
+                     byte[] s1ToDisk = CipherData(1, s1Raw);
++
+                     for (int i = 0; i < 3; i++)
+                     {
+                         byte[] blockData = new byte[16];
+                         Array.Copy(s1ToDisk, i * 16, blockData, 0, 16);
+                         reader.UpdateBinaryBlocks((byte)(4 + i), 16, blockData);
+                     }
++
+                     if (!encrypted)
+                     {
+                         byte[] trailer = reader.ReadBinaryBlocks(7, 16);
+@@ -486,6 +503,7 @@
+                             Array.Copy(encKey, 0, trailer, 0, 6);
+                             Array.Copy(encKey, 0, trailer, 10, 6);
+                             reader.UpdateBinaryBlocks(7, 16, trailer);
++
+                             encrypted = true;
+                             imgEnc.Visible = true;
+                             lblUid.Left = imgEnc.Right;
+@@ -498,10 +516,12 @@
+                     Toast.Show(this, "Failed to authenticate", Toast.LENGTH_SHORT, true);
+                     return;
+                 }
++
+                 if (reader.Authentication6byte(8, 96, 0) || reader.Authentication10byte(8, 96, 0))
+                 {
+                     byte[] s2ToDisk = new byte[48];
+                     Array.Copy(fullDataBytes, 48, s2ToDisk, 0, 48);
++
+                     for (int i = 0; i < 3; i++)
+                     {
+                         byte[] blockData = new byte[16];
+@@ -509,7 +529,11 @@
+                         reader.UpdateBinaryBlocks((byte)(8 + i), 16, blockData);
+                     }
+                 }
+-                Toast.Show(this, "Data written to tag", Toast.LENGTH_SHORT);
++
++                if (!string.IsNullOrEmpty(successToast))
++                {
++                    Toast.Show(this, successToast, Toast.LENGTH_SHORT);
++                }
+             }
+             catch (Exception e)
+             {
+@@ -517,6 +541,80 @@
+             }
+         }
+ 
++        private string EncodeSpoolmanIdForReserve(int spoolId)
++        {
++            // Hidden setting:
++            //   HKCU\CFS RFID\Settings\SmReserveHex (DWORD 0/1)
++            // If enabled, encode as 6 hex chars (range 0..0xFFFFFF). Otherwise, 6 decimal digits (0..999999).
++            bool useHex = Settings.GetSetting("SmReserveHex", false);
++
++            if (spoolId < 0) spoolId = 0;
++
++            if (useHex)
++            {
++                if (spoolId > 0xFFFFFF) return null;
++                return spoolId.ToString("X6");
++            }
++
++            if (spoolId > 999999) return null;
++            return spoolId.ToString("D6");
++        }
++
++        private string WriteReserveToTag(string reserve6)
++        {
++            if (string.IsNullOrWhiteSpace(reserve6)) return "Error: reserve is empty";
++            reserve6 = reserve6.Trim();
++            if (reserve6.Length != 6) return "Error: reserve must be exactly 6 characters";
++
++            if (reader == null) return "Error: reader not connected";
++
++            // Try patching an already-programmed (encrypted) tag by rewriting ONLY sector 1 data.
++            try
++            {
++                bool canAuthEnc = reader.Authentication6byte(4, 96, 1) || reader.Authentication10byte(4, 96, 1);
++                if (canAuthEnc)
++                {
++                    byte[] s1Disk = new byte[48];
++                    Array.Copy(reader.ReadBinaryBlocks(4, 16), 0, s1Disk, 0, 16);
++                    Array.Copy(reader.ReadBinaryBlocks(5, 16), 0, s1Disk, 16, 16);
++                    Array.Copy(reader.ReadBinaryBlocks(6, 16), 0, s1Disk, 32, 16);
++
++                    byte[] s1Plain = CipherData(0, s1Disk);
++                    if (s1Plain == null || s1Plain.Length != 48)
++                        return "Error: unable to decrypt tag data";
++
++                    byte[] reserveBytes = Encoding.UTF8.GetBytes(reserve6);
++                    Array.Copy(reserveBytes, 0, s1Plain, 34, 6);
++
++                    byte[] s1NewDisk = CipherData(1, s1Plain);
++                    for (int i = 0; i < 3; i++)
++                    {
++                        byte[] blockData = new byte[16];
++                        Array.Copy(s1NewDisk, i * 16, blockData, 0, 16);
++                        reader.UpdateBinaryBlocks((byte)(4 + i), 16, blockData);
++                    }
++
++                    return "Wrote reserve to tag: " + reserve6;
++                }
++            }
++            catch
++            {
++                // Fall through to full write
++            }
++
++            // Tag likely empty/unencrypted: write full data with reserve override.
++            try
++            {
++                WriteSpoolData(MaterialID, MaterialColor, GetMaterialLength(MaterialWeight), reserve6, null);
++                return "Wrote reserve to tag: " + reserve6;
++            }
++            catch
++            {
++                return "Error writing reserve to tag";
++            }
++        }
++
++
+ 
+         private void OpenSettings()
+         {
+@@ -894,6 +992,7 @@
+             toolTip.Hide(btnMenu);
+         }
+ 
++        
+         private void LblAdd_Click(object sender, EventArgs e)
+         {
+             using (SmDialog dialog = new SmDialog(vendorName.Text, materialName.Text, MaterialColor, GetMaterialIntWeight(MaterialWeight)))
+@@ -906,20 +1005,58 @@
+                     {
+                         colorName = MaterialColor;
+                     }
++
+                     Toast.Show(this, "Adding spool", Toast.LENGTH_SHORT);
+-                    Task.Run(() => {
+-                        return SmAddSpool(Settings.GetSetting("SmHost", String.Empty), Settings.GetSetting("SmPort", 7912), MaterialID, MaterialColor, colorName, GetMaterialIntWeight(MaterialWeight), pType);
+-                    }).ContinueWith(t => {
+-                        this.Invoke((MethodInvoker)delegate {
+-                            Toast.Show(this, t.Result, Toast.LENGTH_SHORT, t.Result.ToLower().StartsWith("error"));
++
++                    Task.Run(() =>
++                    {
++                        return SmAddSpoolWithId(
++                            Settings.GetSetting("SmHost", String.Empty),
++                            Settings.GetSetting("SmPort", 7912),
++                            MaterialID,
++                            MaterialColor,
++                            colorName,
++                            GetMaterialIntWeight(MaterialWeight),
++                            pType
++                        );
++                    }).ContinueWith(t =>
++                    {
++                        this.Invoke((MethodInvoker)delegate
++                        {
++                            var res = t.Result;
++                            string msg = (res != null && !string.IsNullOrEmpty(res.Message)) ? res.Message : "Error adding spool";
++                            Toast.Show(this, msg, Toast.LENGTH_SHORT, msg.ToLower().StartsWith("error"));
++
++                            // Hidden setting:
++                            //   HKCU\CFS RFID\Settings\SmWriteReserve (DWORD 0/1)
++                            // Default: enabled
++                            bool writeReserve = Settings.GetSetting("SmWriteReserve", true);
++                            if (!writeReserve) return;
++
++                            if (res == null || !res.Success || !res.SpoolId.HasValue) return;
++
++                            if (reader == null)
++                            {
++                                Toast.Show(this, "Spool created, but no tag present to write reserve", Toast.LENGTH_SHORT, true);
++                                return;
++                            }
++
++                            string reserve6 = EncodeSpoolmanIdForReserve(res.SpoolId.Value);
++                            if (string.IsNullOrEmpty(reserve6))
++                            {
++                                Toast.Show(this, "Error: Spool ID too large to encode into reserve (adjust encoding settings)", Toast.LENGTH_SHORT, true);
++                                return;
++                            }
++
++                            string wr = WriteReserveToTag(reserve6);
++                            Toast.Show(this, wr, Toast.LENGTH_SHORT, wr.ToLower().StartsWith("error"));
+                         });
+                     });
+                 }
+             }
+-
+-
+         }
+ 
++
+         private void BtnAdd_MouseLeave(object sender, EventArgs e)
+         {
+             toolTip.Hide(btnAdd);
+
+--- a/Windows/CFS-RFID/Utils.cs
++++ b/Windows/CFS-RFID/Utils.cs
+@@ -1122,112 +1122,409 @@
+ 
+ 
+ 
+-        public static string SmAddSpool(string host, int port, string materialID, string hexColor, string colorName, int weightGrams, string printerType)
++        
++        public class SmAddSpoolResult
+         {
+-            string baseUrl = string.Format("http://{0}:{1}/api/v1", host, port);
++            public bool Success { get; set; }
++            public int? SpoolId { get; set; }
++            public int? FilamentId { get; set; }
++            public int? VendorId { get; set; }
++            public string Message { get; set; }
++            public string RawResponse { get; set; }
++        }
++
++        /// <summary>
++        /// Returns the Spoolman API base URL (ending in /api/v1) from user settings.
++        /// Accepts either a host (e.g. 192.168.1.10) or a full URL (e.g. http://host:7912 or https://host/spoolman).
++        /// </summary>
++        private static string BuildSmApiBase(string host, int port)
++        {
++            if (string.IsNullOrWhiteSpace(host)) return null;
++
++            string h = host.Trim();
++
++            if (!h.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
++                !h.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
++            {
++                h = "http://" + h;
++            }
++
+             try
+             {
+-                var localData = GetMaterialByID(materialID);
+-                if (localData == null) return "MaterialID " + materialID + " not found";
+-                string vendorName = localData.FilamentVendor.Trim();
+-                string fNameWithColor = localData.FilamentName.Trim() + " (" + colorName + ")";
++                UriBuilder ub = new UriBuilder(h);
++
++                // If the user entered a full URL that already includes a port, respect it
++                // unless an explicit port was provided.
++                if (port > 0)
++                {
++                    ub.Port = port;
++                }
++
++                string path = (ub.Path ?? string.Empty).TrimEnd('/');
++
++                // If the user already included /api/v1 somewhere, don't try to be clever.
++                if (path.IndexOf("/api/v1", StringComparison.OrdinalIgnoreCase) >= 0)
++                {
++                    ub.Path = path;
++                }
++                else
++                {
++                    if (string.IsNullOrEmpty(path) || path == "/")
++                        ub.Path = "/api/v1";
++                    else
++                        ub.Path = path + "/api/v1";
++                }
++
++                return ub.Uri.ToString().TrimEnd('/');
++            }
++            catch
++            {
++                return null;
++            }
++        }
++
++        private static JArray PerformSmPagedGet(string baseUrl, string path, int limit = 200, int maxLoops = 1000)
++        {
++            try
++            {
++                int offset = 0;
++                int loops = 0;
++                JArray all = new JArray();
++
++                while (true)
++                {
++                    loops++;
++                    if (loops > maxLoops) break;
++
++                    string url = string.Format("{0}{1}?limit={2}&offset={3}", baseUrl, path, limit, offset);
++                    string res = PerformSmRequest(url, "GET");
++                    if (res == null) return null;
++
++                    JArray arr = JArray.Parse(res);
++                    foreach (var it in arr) all.Add(it);
++
++                    if (arr.Count < limit) break;
++                    offset += limit;
++                }
++
++                return all;
++            }
++            catch
++            {
++                return null;
++            }
++        }
++
++        private static double? TryReadDouble(JToken token)
++        {
++            try
++            {
++                if (token == null || token.Type == JTokenType.Null) return null;
++                if (token.Type == JTokenType.Float || token.Type == JTokenType.Integer) return (double)token;
++
++                double v;
++                if (double.TryParse(token.ToString(),
++                    System.Globalization.NumberStyles.Any,
++                    System.Globalization.CultureInfo.InvariantCulture, out v))
++                {
++                    return v;
++                }
++                if (double.TryParse(token.ToString(), out v)) return v;
++            }
++            catch { }
++            return null;
++        }
++
++        private static int? TryReadInt(JToken token)
++        {
++            try
++            {
++                if (token == null || token.Type == JTokenType.Null) return null;
++                if (token.Type == JTokenType.Integer) return (int)token;
++
++                int v;
++                if (int.TryParse(token.ToString(), out v)) return v;
++            }
++            catch { }
++            return null;
++        }
++
++        private static string NormalizeColorHex(string hexColor)
++        {
++            if (string.IsNullOrWhiteSpace(hexColor)) return null;
++
++            string c = hexColor.Trim();
++
++            if (c.StartsWith("#")) c = c.Substring(1);
++            if (c.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) c = c.Substring(2);
++
++            // Keep hex chars only
++            c = new string(c.Where(ch => Uri.IsHexDigit(ch)).ToArray());
++
++            if (c.Length < 6) return null;
++            if (c.Length > 8) c = c.Substring(0, 8);
++
++            return c.ToUpperInvariant();
++        }
++
++        public static SmAddSpoolResult SmAddSpoolWithId(string host, int port, string materialID, string hexColor, string colorName, int weightGrams, string printerType)
++        {
++            SmAddSpoolResult result = new SmAddSpoolResult { Success = false, Message = "Error adding spool" };
++
++            string baseUrl = BuildSmApiBase(host, port);
++            if (string.IsNullOrEmpty(baseUrl))
++            {
++                result.Message = "Error: Spoolman host not set/invalid";
++                return result;
++            }
++
++            try
++            {
++                Filament localData = GetMaterialByID(materialID);
++                if (localData == null)
++                {
++                    result.Message = "MaterialID " + materialID + " not found";
++                    return result;
++                }
++
++                string vendorName = (localData.FilamentVendor ?? string.Empty).Trim();
++                if (string.IsNullOrEmpty(vendorName)) vendorName = "Unknown";
++
++                string filamentName = (localData.FilamentName ?? string.Empty).Trim();
++                if (string.IsNullOrEmpty(filamentName)) filamentName = materialID;
++
++                string colorHex = NormalizeColorHex(hexColor) ?? "000000";
++                string colorLabel = string.IsNullOrEmpty(colorName) ? colorHex : colorName.Trim();
++
++                // To align with your Filament-Sync script: default article_number prefix "Creality:"
++                // Hidden setting: HKCU\CFS RFID\Settings\SmArticlePrefix (String)
++                string articlePrefix = Settings.GetSetting("SmArticlePrefix", "Creality:");
++                if (string.IsNullOrEmpty(articlePrefix)) articlePrefix = "Creality:";
++                string articleNumber = articlePrefix + materialID;
++
++                // ---------------------
++                // Vendor (by name)
++                // ---------------------
+                 int vendorId = -1;
+-                string vRes = PerformSmRequest(baseUrl + "/vendor", "GET");
+-                if (vRes == null)
++                JArray vendors = PerformSmPagedGet(baseUrl, "/vendor");
++                if (vendors == null)
+                 {
+-                    return "Error adding spool";
++                    result.Message = "Error: Unable to reach Spoolman";
++                    return result;
+                 }
+-                else 
+-                { 
+-                    JArray vArray = JArray.Parse(vRes);
+-                    foreach (JObject v in vArray)
++
++                foreach (JObject v in vendors)
++                {
++                    if (v["name"] != null && string.Equals(v["name"].ToString(), vendorName, StringComparison.OrdinalIgnoreCase))
+                     {
+-                        if (string.Equals(v["name"].ToString(), vendorName, StringComparison.OrdinalIgnoreCase))
+-                        {
+-                            vendorId = (int)v["id"];
+-                            break;
+-                        }
++                        vendorId = (int)v["id"];
++                        break;
+                     }
+                 }
++
+                 if (vendorId == -1)
+                 {
+-                    string vBody = JsonConvert.SerializeObject(new { 
+-                        name = vendorName, 
+-                        comment = "Created by: Cfs RFID"
++                    string vBody = JsonConvert.SerializeObject(new
++                    {
++                        name = vendorName,
++                        comment = "[CFS-RFID] Created by CFS RFID"
+                     });
++
+                     string newV = PerformSmRequest(baseUrl + "/vendor", "POST", vBody);
+                     if (newV != null)
+                         vendorId = (int)JObject.Parse(newV)["id"];
+                 }
++
++                if (vendorId == -1)
++                {
++                    result.Message = "Error: Failed to create/find vendor";
++                    return result;
++                }
++
++                result.VendorId = vendorId;
++
++                // ---------------------
++                // Filament (prefer article_number match)
++                // ---------------------
+                 int filamentId = -1;
+-                string fRes = PerformSmRequest(baseUrl + "/filament", "GET");
+-                if (fRes != null)
++                JArray filaments = PerformSmPagedGet(baseUrl, "/filament");
++                if (filaments == null)
++                {
++                    result.Message = "Error: Unable to query filaments";
++                    return result;
++                }
++
++                foreach (JObject f in filaments)
++                {
++                    if (f["article_number"] != null && f["article_number"].Type != JTokenType.Null)
++                    {
++                        string an = f["article_number"].ToString();
++                        if (!string.IsNullOrEmpty(an) && string.Equals(an, articleNumber, StringComparison.OrdinalIgnoreCase))
++                        {
++                            filamentId = (int)f["id"];
++                            break;
++                        }
++                    }
++                }
++
++                // Fallback match: vendor + name + color
++                if (filamentId == -1)
+                 {
+-                    JArray fArray = JArray.Parse(fRes);
+-                    foreach (JObject f in fArray)
++                    foreach (JObject f in filaments)
+                     {
+                         int vIdCheck = (f["vendor"] != null && f["vendor"].Type != JTokenType.Null)
+                                        ? (int)f["vendor"]["id"] : -1;
+ 
+-                        if (vIdCheck == vendorId && string.Equals(f["name"].ToString(), fNameWithColor, StringComparison.OrdinalIgnoreCase))
++                        string n = f["name"] != null ? f["name"].ToString() : string.Empty;
++                        string c = f["color_hex"] != null ? f["color_hex"].ToString() : string.Empty;
++
++                        if (vIdCheck == vendorId &&
++                            string.Equals(n, filamentName, StringComparison.OrdinalIgnoreCase) &&
++                            string.Equals(NormalizeColorHex(c), colorHex, StringComparison.OrdinalIgnoreCase))
+                         {
+                             filamentId = (int)f["id"];
+                             break;
+                         }
+                     }
+                 }
++
+                 if (filamentId == -1)
+                 {
+-                    var fBodyDict = new Dictionary<string, object>();
+-                    fBodyDict.Add("name", fNameWithColor);
++                    Dictionary<string, object> fBodyDict = new Dictionary<string, object>();
++                    fBodyDict.Add("name", filamentName);
+                     fBodyDict.Add("vendor_id", vendorId);
+-                    fBodyDict.Add("color_hex", hexColor.Replace("#", ""));
+-                    fBodyDict.Add("comment", "Created by: Cfs RFID");
+-                    if (!string.IsNullOrEmpty(localData.FilamentParam))
++                    fBodyDict.Add("color_hex", colorHex);
++                    fBodyDict.Add("article_number", articleNumber);
++                    fBodyDict.Add("comment", "[CFS-RFID] Created by CFS RFID (color " + colorLabel + ")");
++
++                    // Pull additional properties from the local Creality material DB entry, when available
++                    try
+                     {
+-                        JObject root = JObject.Parse(localData.FilamentParam);
+-                        if (root["base"] != null)
++                        if (!string.IsNullOrEmpty(localData.FilamentParam))
+                         {
+-                            fBodyDict.Add("material", root["base"]["meterialType"].ToString());
+-                            fBodyDict.Add("diameter", (double)root["base"]["diameter"]);
+-                        }
+-                        if (root["kvParam"] != null)
+-                        {
+-                            JToken kvParam = root["kvParam"];
+-                            if (kvParam["nozzle_temperature"] != null)
+-                                fBodyDict.Add("settings_extruder_temp", int.Parse(kvParam["nozzle_temperature"].ToString()));
+-                            if (kvParam["hot_plate_temp"] != null)
+-                                fBodyDict.Add("settings_bed_temp", int.Parse(kvParam["hot_plate_temp"].ToString()));
+-                            if (kvParam["filament_density"] != null)
+-                                fBodyDict.Add("density", (double)kvParam["filament_density"]);
++                            JObject root = JObject.Parse(localData.FilamentParam);
++
++                            if (root["base"] != null)
++                            {
++                                if (root["base"]["meterialType"] != null)
++                                    fBodyDict["material"] = root["base"]["meterialType"].ToString();
++
++                                double? dia = TryReadDouble(root["base"]["diameter"]);
++                                if (dia.HasValue) fBodyDict["diameter"] = dia.Value;
++
++                                double? densBase = TryReadDouble(root["base"]["density"]);
++                                if (densBase.HasValue) fBodyDict["density"] = densBase.Value;
++                            }
++
++                            if (root["kvParam"] != null)
++                            {
++                                JToken kvParam = root["kvParam"];
++
++                                // Some DBs store these in kvParam instead of base
++                                if (!fBodyDict.ContainsKey("material") && kvParam["filament_type"] != null)
++                                    fBodyDict["material"] = kvParam["filament_type"].ToString();
++
++                                if (!fBodyDict.ContainsKey("diameter"))
++                                {
++                                    double? dia2 = TryReadDouble(kvParam["filament_diameter"]);
++                                    if (dia2.HasValue) fBodyDict["diameter"] = dia2.Value;
++                                }
++
++                                if (!fBodyDict.ContainsKey("density"))
++                                {
++                                    double? dens2 = TryReadDouble(kvParam["filament_density"]);
++                                    if (dens2.HasValue) fBodyDict["density"] = dens2.Value;
++                                }
++
++                                int? nozzle = TryReadInt(kvParam["nozzle_temperature"]);
++                                if (nozzle.HasValue) fBodyDict["settings_extruder_temp"] = nozzle.Value;
++
++                                int? bed = TryReadInt(kvParam["hot_plate_temp"]);
++                                if (!bed.HasValue) bed = TryReadInt(kvParam["cool_plate_temp"]);
++                                if (!bed.HasValue) bed = TryReadInt(kvParam["textured_plate_temp"]);
++                                if (bed.HasValue) fBodyDict["settings_bed_temp"] = bed.Value;
++                            }
+                         }
+                     }
++                    catch { }
++
++                    // Spoolman requires diameter + density for filament creation.
++                    // If the DB entry didn't provide them, use safe defaults so users don't get stuck.
++                    if (!fBodyDict.ContainsKey("diameter")) fBodyDict["diameter"] = 1.75;
++                    if (!fBodyDict.ContainsKey("density"))
++                    {
++                        fBodyDict["density"] = 1.24;
++                        fBodyDict["comment"] = fBodyDict["comment"] + " (density defaulted)";
++                    }
++
+                     string newF = PerformSmRequest(baseUrl + "/filament", "POST", JsonConvert.SerializeObject(fBodyDict));
+                     if (newF != null)
+                         filamentId = (int)JObject.Parse(newF)["id"];
+                 }
+ 
+-                if (filamentId != -1)
++                if (filamentId == -1)
+                 {
+-                    var sBodyObj = new
+-                    {
+-                        filament_id = filamentId,
+-                        initial_weight = weightGrams,
+-                        remaining_weight = weightGrams,
+-                        comment = "RFID tagged for " + printerType
+-                    };
+-                    string sBody = JsonConvert.SerializeObject(sBodyObj);
+-                    string ret = PerformSmRequest(baseUrl + "/spool", "POST", sBody);
+-                    return ret != null ? "Spool created for\n" + fNameWithColor : "Failed to create spool";
++                    result.Message = "Error: Failed to create/find filament";
++                    return result;
++                }
++
++                result.FilamentId = filamentId;
++
++                // ---------------------
++                // Spool
++                // ---------------------
++                var sBodyObj = new
++                {
++                    filament_id = filamentId,
++                    initial_weight = weightGrams,
++                    remaining_weight = weightGrams,
++                    comment = string.Format("[CFS-RFID] RFID tagged for {0}; creality_id={1}; color={2}; color_hex={3}",
++                        printerType, materialID, colorLabel, colorHex)
++                };
++
++                string sBody = JsonConvert.SerializeObject(sBodyObj);
++                string ret = PerformSmRequest(baseUrl + "/spool", "POST", sBody);
++
++                if (ret == null)
++                {
++                    result.Message = "Failed to create spool";
++                    return result;
++                }
++
++                result.RawResponse = ret;
++
++                try
++                {
++                    JObject created = JObject.Parse(ret);
++                    if (created["id"] != null)
++                        result.SpoolId = (int)created["id"];
+                 }
++                catch { }
++
++                result.Success = true;
++
++                string label = filamentName + " (" + colorLabel + ")";
++                if (result.SpoolId.HasValue)
++                    result.Message = "Spool created (ID " + result.SpoolId.Value + ") for\n" + label;
++                else
++                    result.Message = "Spool created for\n" + label;
++
++                return result;
+             }
+             catch (Exception e)
+             {
+-                return "Error " + e.Message;
++                result.Message = "Error " + e.Message;
++                return result;
+             }
+-            return null;
+         }
+ 
++        public static string SmAddSpool(string host, int port, string materialID, string hexColor, string colorName, int weightGrams, string printerType)
++        {
++            SmAddSpoolResult res = SmAddSpoolWithId(host, port, materialID, hexColor, colorName, weightGrams, printerType);
++            return res != null ? res.Message : "Error adding spool";
++        }
++
++
+         private static string PerformSmRequest(string url, string method, string jsonBody = null)
+         {
+             using (TimedWebClient client = new TimedWebClient())

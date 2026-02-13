@@ -1,0 +1,22 @@
+name: PSScriptAnalyzer
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  analyze:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
+
+      - name: Analyze PowerShell scripts
+        shell: pwsh
+        run: |
+          Invoke-ScriptAnalyzer -Path ./tools -Recurse -Severity Warning

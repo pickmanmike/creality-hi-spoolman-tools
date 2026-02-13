@@ -1,0 +1,22 @@
+{
+  "spoolmanUrl": "http://127.0.0.1:7912",
+  "spoolmanHeaders": {},
+  "statePath": "C:/spoolman/data/cfs-spoolman-state.json",
+  "locationPrefix": "CFS:",
+  "locationField": "location",
+  "reserveMode": "decimal",
+  "updateRemainingWeight": true,
+  "missingLocation": "",
+  "sshAuth": "key",
+  "sshKeyPath": "C:/Users/<YOU>/.ssh/creality_hi_ed25519",
+  "sshConnectTimeoutSec": 5,
+  "materialBoxInfoPath": "/mnt/UDISK/creality/userdata/box/material_box_info.json",
+  "printers": [
+    {
+      "name": "CrealityHi",
+      "host": "192.168.1.123",
+      "sshUser": "root",
+      "sshPort": 22
+    }
+  ]
+}
