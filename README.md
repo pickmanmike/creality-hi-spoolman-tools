@@ -82,22 +82,22 @@ If the dry-run looks sane, remove `-DryRun`.
 
 To identify a *physical spool* across swaps/moves, we need a spool-level identity.
 
-Creality’s tag format includes a 6‑character **`reserve`** field.
+Creality’s tag format includes a 6‑character **`serialNum`** field.
 
 **We use:**
 
-> `RFID reserve (6 chars)  ==  Spoolman spool.id` (zero‑padded)
+> `RFID serialNum (6 chars)  ==  Spoolman spool.id` (zero‑padded)
 
 Example:
 
 - Spoolman `spool.id` = `123`
-- RFID `reserve` = `"000123"`
+- RFID `serialNum` = `"000123"`
 
 That gives a stable 1:1 mapping:
 
-**CFS slot → reserve → Spoolman spool record**
+**CFS slot → serialNum → Spoolman spool record**
 
-> If you prefer hex (6 chars), this repo supports it too (`reserveMode: "hex"`).
+> Legacy reserve parsing is still supported (`reserveMode: "hex"` for old tags).
 
 More detail: see `docs/ARCHITECTURE.md`.
 
@@ -115,15 +115,16 @@ More detail: see `docs/ARCHITECTURE.md`.
 | `tools/sync-creality-materials-to-spoolman.ps1` | Imports Creality filament profiles as regular filaments (older / alternate strategy) |
 | `tools/sync-cfs-slots-to-spoolman.ps1` | Reads `material_box_info.json` from printer(s) over SSH and PATCHes Spoolman spool locations (and optionally remaining weight) |
 | `tools/run-cfs-slot-sync.ps1` | Wrapper for Task Scheduler: per-run logs + overlap protection |
+| `tools/migrate-creality-comment-to-extra.ps1` | Migrates legacy `[CFS-RFID]` comment metadata into `spool.extra` (DryRun by default) |
 
 ### Config / examples
 
 - `config/cfs-spoolman-bridge.example.json` – copy to `config/cfs-spoolman-bridge.json` and edit  
 - `examples/docker-compose.spoolman.yml` – starter Spoolman compose file (host port `7912` → container port `8000`)
 
-### Optional patch
+### Optional patch (legacy)
 
-- `patches/k2-rfid-spoolman-reserve-v2-git.patch` – patch for the Windows RFID tool to write the Spoolman `spool.id` into the tag’s `reserve` field.
+- `patches/k2-rfid-spoolman-reserve-v2-git.patch` – legacy patch that wrote `spool.id` into the tag’s `reserve` field. Kept for reference only; Identity v2 should use `serialNum = D6(spool.id)` via the Repo C fork.
 
 ---
 
@@ -139,7 +140,7 @@ flowchart LR
   end
 
   subgraph Printer["Creality Hi / CFS"]
-    Box["material_box_info.json<br/>(slot state, reserve, remainLen)"]
+    Box["material_box_info.json<br/>(slot state, serialNum, reserve, remainLen)"]
     CFS["CFS hardware<br/>reads RFID tags"]
   end
 
@@ -147,7 +148,7 @@ flowchart LR
   CFS --> Box
   Tools -->|SSH read-only| Box
   Tools -->|PATCH /api/v1/spool/{id}| SM
-  RFID -->|create spool + write reserve=spool.id| SM
+  RFID -->|create spool + write serialNum=spool.id| SM
   RFID -->|write tag| CFS
 ```
 
@@ -253,12 +254,12 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\tools\sync-creality-materials-to
 
 You have two common approaches:
 
-- **Use our patched fork of the RFID tool** (recommended): it can create a Spoolman spool and then write `reserve = spool.id`.
-- **Manual:** create the spool in Spoolman, then write the reserve field yourself (error-prone, but possible).
+- **Use our patched fork of the RFID tool** (recommended): it can create a Spoolman spool and then write `serialNum = spool.id`.
+- **Manual:** create the spool in Spoolman, then write the serialNum field yourself (error-prone, but possible).
 
 Either way, the goal is:
 
-> the tag `reserve` field contains the Spoolman `spool.id` (6 chars)
+> the tag `serialNum` field contains the Spoolman `spool.id` (6 chars)
 
 ---
 
@@ -281,7 +282,7 @@ Copy-Item .\config\cfs-spoolman-bridge.example.json .\config\cfs-spoolman-bridge
 The slot sync script accepts some helpful optional keys (see script header for full list):
 
 - `locationPrefix` (default `"CFS:"`)
-- `reserveMode`: `"auto"` (default), `"decimal"`, or `"hex"`
+- `reserveMode`: legacy reserve parsing (`"auto"` default, `"decimal"`, or `"hex"`)
 - `updateRemainingWeight`: `true|false`
 - `spoolmanHeaders`: for reverse proxies / auth headers
 - `debugDumpDir`: dump raw JSON when parsing fails

@@ -1,13 +1,14 @@
 #requires -Version 5.1
 <#
 .SYNOPSIS
-  Sync Creality CFS slot state (material_box_info.json) into Spoolman by using the RFID tag reserve field as the Spoolman spool.id.
+  Sync Creality CFS slot state (material_box_info.json) into Spoolman by resolving spool identity from RFID data (v2 serialNum, legacy reserve).
 
 .DESCRIPTION
   - Reads /mnt/UDISK/creality/userdata/box/material_box_info.json from one or more printers over SSH (read-only).
-  - For each slot with a non-zero reserve:
-      * Decodes reserve -> spool_id (decimal by default, or hex if configured)
-      * PATCHes Spoolman: /api/v1/spool/<spool_id> with {"location": "<prefix><printer>:<box><slot>"}
+  - For each slot with RFID data:
+      * v2: serialNum (D6 decimal) -> spool_id
+      * legacy: reserve6 -> spool_id (decimal by default, or hex if configured)
+      * then PATCHes Spoolman: /api/v1/spool/<spool_id> with {"location": "<prefix><printer>:<box><slot>"}
   - Optionally clears locations for spools that were previously seen but are no longer loaded.
 
 .NOTES
@@ -496,6 +497,23 @@ function Parse-ReserveToSpoolId {
   } catch { return $null }
 }
 
+function Parse-SerialNumToSpoolId {
+  param([AllowNull()][string]$SerialNum)
+
+  if ($null -eq $SerialNum) { return $null }
+  $s = $SerialNum.Trim()
+  if ($s.Length -eq 0) { return $null }
+
+  # Be tolerant: if firmware ever writes >6 chars, take the first 6.
+  if ($s.Length -lt 6) { return $null }
+  if ($s.Length -gt 6) { $s = $s.Substring(0, 6) }
+
+  if ($s -match "^0{6}$") { return $null }
+  if ($s -notmatch "^[0-9]{6}$") { return $null }
+
+  try { return [int]$s } catch { return $null }
+}
+
 
 function Parse-RemainLenPercent {
   param([AllowNull()][object]$RemainLen)
@@ -902,6 +920,9 @@ try {
 
     foreach ($s in $slots) {
       $spoolId = Parse-ReserveToSpoolId -Reserve $s.reserve -Mode $reserveMode
+      if ($null -eq $spoolId) {
+        $spoolId = Parse-SerialNumToSpoolId -SerialNum $s.serialNum
+      }
       if ($null -eq $spoolId) { continue }
 
       $stats.spools_seen++
