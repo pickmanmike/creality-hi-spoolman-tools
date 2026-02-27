@@ -27,17 +27,19 @@ This includes:
 - filamentId
 - color
 - remainLen (percent remaining)
-- and (when RFID is present) decoded tag fields including `reserve`
+- and (when RFID is present) decoded tag fields including `serialNum` (and legacy `reserve`)
 
-## Why reserve is used as the Spoolman identity bridge
+## Why serialNum is used as the Spoolman identity bridge
 
-Creality’s `reserve` is typically unused (often `000000`).
+Creality’s `serialNum` is a stable 6‑digit field.
 Spoolman has a unique numeric `spool.id`.
 
 So the clean bridge is:
 
-- write `spool.id` into `reserve`
+- write `spool.id` into `serialNum`
 - read it back from printer slot state
 - update the matching spool in Spoolman
+
+Legacy `reserve` remains parseable for older tags.
 
 This repo implements the “read + sync” side.

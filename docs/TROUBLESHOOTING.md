@@ -59,11 +59,11 @@ This is less secure (MITM risk), but it avoids prompts.
 
 The slot sync only updates spools when it can map:
 
-1. slot → RFID `reserve` (6 chars)  
-2. reserve → `spool.id` (decimal or hex)  
+1. slot → RFID `serialNum` (6 chars)  
+2. serialNum → `spool.id` (decimal)  
 3. `spool.id` exists in Spoolman
 
-If reserve is `"000000"` or missing, nothing can be matched.
+Legacy `reserve` is still parsed for older tags.
 
 ---
 
