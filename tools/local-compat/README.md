@@ -7,4 +7,4 @@ These scripts preserve the currently working Printer PC deployment pattern:
 - local Spoolman extra-field compatibility schema
 - safe slot sync that skips unknown and duplicate spool IDs
 
-They are intentionally conservative and should be treated as deployment/runtime helpers until the behavior is fully upstreamed into the default tools.
+These are intentionally conservative deployment/runtime helpers until the behavior is fully upstreamed into the default tools.
